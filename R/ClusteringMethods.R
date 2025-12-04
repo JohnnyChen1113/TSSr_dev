@@ -2,15 +2,26 @@
 #' Cluster TSSs into tag clusters
 #'
 #' @description Clusters TSSs within small genomic regions into tag clusters (TCs)
-#' using "peakclu" method. "peakclu" method is an implementation of peak-based clustering.
-#' The minimum distance of two neighboring peaks can be specified.
+#' using peak-based clustering methods. Two methods are available:
+#' \itemize{
+#'   \item "peakclu": Local maximum approach - each position is checked if it's
+#'         the maximum within its neighborhood (default)
+#'   \item "peakcluMax": Global maximum greedy approach - peaks are selected by
+#'         globally sorting all positions by signal strength and greedily picking
+#'         the strongest peaks first, ensuring minimum distance between peaks
+#' }
 #'
 #' @usage clusterTSS(object, method = "peakclu", peakDistance=100,extensionDistance=30
 #' , localThreshold = 0.02,clusterThreshold = 1, useMultiCore=FALSE, numCores=NULL)
 #'
 #'
 #' @param object  A TSSr object
-#' @param method  Clustering method to be used for clustering: "peakclu". Default is "peakclu".
+#' @param method  Clustering method: "peakclu" (default) or "peakcluMax".
+#'        "peakclu" uses local maximum approach where each position independently
+#'        checks if it's the maximum in its neighborhood.
+#'        "peakcluMax" uses global maximum greedy approach that prioritizes
+#'        the strongest peaks first, which may identify more distinct clusters
+#'        in regions with complex TSS patterns.
 #' @param peakDistance  Minimum distance of two neighboring peaks. Default value = 100.
 #' @param extensionDistance Maximal distance between peak and its neighboring TSS or two
 #' neighboring TSSs to be grouped in the same cluster. Default value = 30.
@@ -28,8 +39,11 @@
 #' @examples
 #' \donttest{
 #' data(exampleTSSr)
-#' clusterTSS(exampleTSSr, method = "peakclu",clusterThreshold = 1,
-#' useMultiCore=FALSE, numCores = NULL)
+#' # Standard clustering with peakclu
+#' clusterTSS(exampleTSSr, method = "peakclu", clusterThreshold = 1)
+#'
+#' # Alternative clustering with peakcluMax
+#' clusterTSS(exampleTSSr, method = "peakcluMax", clusterThreshold = 1)
 #' }
 #'
 
@@ -41,7 +55,18 @@ setGeneric("clusterTSS",function(object, method = "peakclu"
 #' @export
 setMethod("clusterTSS",signature(object = "TSSr"), function(object, method, peakDistance, extensionDistance
                                                             , localThreshold,clusterThreshold,useMultiCore, numCores){
-  message("\nClustering TSS data with ", method, " method...")
+  # Validate method parameter
+  valid_methods <- c("peakclu", "peakcluMax")
+  if (!method %in% valid_methods) {
+    stop("Unknown clustering method: '", method, "'. ",
+         "Available methods: ", paste(valid_methods, collapse = ", "))
+  }
+
+  message("\nClustering TSS data with '", method, "' method...")
+  if (method == "peakcluMax") {
+    message("Using global maximum greedy approach for peak selection")
+  }
+
   ##initialize values
   Genome <- .getGenome(object@genomeName)
   sampleLabelsMerged <- object@sampleLabelsMerged
@@ -72,7 +97,10 @@ setMethod("clusterTSS",signature(object = "TSSr"), function(object, method, peak
         setorder(tss, pos)
         if(method == "peakclu"){
           cluster.data <- .clusterByPeak(tss, peakDistance, localThreshold, extensionDistance)
+        } else if(method == "peakcluMax"){
+          cluster.data <- .clusterByPeakMax(tss, peakDistance, localThreshold, extensionDistance)
         }
+        return(cluster.data)
       }, mc.cores = numCores)
       tss.clusters <- rbindlist(clusters, use.names=TRUE, fill=TRUE)
       tss.clusters <- tss.clusters[tags >clusterThreshold,]
@@ -93,7 +121,10 @@ setMethod("clusterTSS",signature(object = "TSSr"), function(object, method, peak
         setorder(tss, pos)
         if(method == "peakclu"){
           cluster.data <- .clusterByPeak(tss, peakDistance, localThreshold, extensionDistance)
+        } else if(method == "peakcluMax"){
+          cluster.data <- .clusterByPeakMax(tss, peakDistance, localThreshold, extensionDistance)
         }
+        return(cluster.data)
       })
       tss.clusters <- rbindlist(clusters, use.names=TRUE, fill=TRUE)
       tss.clusters <- tss.clusters[tags >clusterThreshold,]

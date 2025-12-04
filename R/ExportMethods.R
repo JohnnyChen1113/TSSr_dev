@@ -2,37 +2,111 @@
 #' Pairwise scatter plots and correlations of TSS signal
 #'
 #' @description Calculates the pairwise correlation coefficients between samples and
-#' creates a matix showing pairwise scatter plots and correlation coefficients.
+#' creates a matrix showing pairwise scatter plots and correlation coefficients.
 #'
-#' @usage plotCorrelation(object, samples = "all")
+#' @usage plotCorrelation(object, samples = "all", format = "png",
+#'                        width = 8, height = 8, dpi = 300, maxPoints = 50000)
 #' @param object A TSSr object.
 #' @param samples Specify samples to be plotted. Can be either "all" to plot all samples in the object
-#' or a subset of samples in the object. Default is "all".
+#'        or a subset of samples in the object. Default is "all".
+#' @param format Output format: "png" (default, smaller file), "pdf", or "tiff".
+#' @param width Plot width in inches. Default = 8.
+#' @param height Plot height in inches. Default = 8.
+#' @param dpi Resolution in dots per inch for PNG/TIFF output. Default = 300.
+#' @param maxPoints Maximum number of points to plot. If data exceeds this, random sampling
+#'        is applied to reduce file size. Default = 50000. Set to NULL to plot all points.
 #' @return pairwise correlations visualized in a graph
 #'
+#' @details
+#' For large datasets, the function automatically samples points to prevent
+#' extremely large output files. The correlation coefficients are always
+#' calculated using ALL data points, only the visualization is sampled.
+#'
+#' Output formats:
+#' \itemize{
+#'   \item png: Recommended for most uses. Small file size, 300 dpi by default.
+#'   \item pdf: Vector format, good for publication but can be very large with many points.
+#'   \item tiff: High quality raster, suitable for publication requirements.
+#' }
 #'
 #' @export
 #'
 #' @examples
 #' data(exampleTSSr)
-#' #plotCorrelation(exampleTSSr, samples = "all")
+#' #plotCorrelation(exampleTSSr, samples = "all", format = "png", dpi = 300)
 #'
-setGeneric("plotCorrelation",function(object, samples = "all")standardGeneric("plotCorrelation"))
+setGeneric("plotCorrelation",function(object, samples = "all", format = "png",
+                                       width = 8, height = 8, dpi = 300,
+                                       maxPoints = 50000)standardGeneric("plotCorrelation"))
 #' @rdname plotCorrelation
 #' @export
-setMethod("plotCorrelation",signature(object = "TSSr"), function(object, samples){
+setMethod("plotCorrelation",signature(object = "TSSr"), function(object, samples,
+                                                                   format, width, height,
+                                                                   dpi, maxPoints){
   message("Plotting TSS correlations...")
+
   tss.raw <- object@TSSrawMatrix
-  if(samples == "all"){
+  if(samples[1] == "all"){
     tss <- tss.raw
+    sample_label <- "all"
   }else{
     cols <- c("chr","pos","strand", samples)
     tss <- tss.raw[,.SD, .SDcols = cols]
+    sample_label <- paste(samples, collapse = "_")
   }
-  pdf(file = paste("TSS_correlation_plot_of_", paste(samples, collapse = "_"), "_samples.pdf", sep = "")
-      ,width = 8, height = 8, onefile = TRUE, bg = "transparent", family = "Helvetica", fonts = NULL)
-  .plotCorrelation(tss)
+
+  # Generate output filename
+  base_name <- paste0("TSS_correlation_plot_of_", sample_label, "_samples")
+
+  # Validate format
+
+  format <- tolower(format)
+  if (!format %in% c("png", "pdf", "tiff")) {
+    warning("Unsupported format. Using 'png' instead.")
+    format <- "png"
+  }
+
+  output_file <- paste0(base_name, ".", format)
+
+  # Report data size
+  n_points <- nrow(tss)
+  message(paste("Total data points:", n_points))
+
+  # Open appropriate graphics device
+  if (format == "png") {
+    png(filename = output_file, width = width, height = height,
+        units = "in", res = dpi, bg = "white")
+    message(paste("Output format: PNG,", dpi, "dpi"))
+  } else if (format == "tiff") {
+    tiff(filename = output_file, width = width, height = height,
+         units = "in", res = dpi, compression = "lzw", bg = "white")
+    message(paste("Output format: TIFF,", dpi, "dpi"))
+  } else {
+    # PDF - use cairo_pdf for better compression if available
+    if (capabilities("cairo")) {
+      cairo_pdf(filename = output_file, width = width, height = height,
+                bg = "white", family = "Helvetica")
+      message("Output format: PDF (cairo)")
+    } else {
+      pdf(file = output_file, width = width, height = height,
+          onefile = TRUE, bg = "white", family = "Helvetica")
+      message("Output format: PDF")
+    }
+  }
+
+  # Plot with optional point sampling
+  .plotCorrelation(tss, maxPoints = maxPoints)
+
   dev.off()
+  message(paste("Plot saved to:", output_file))
+
+  # Report file size
+  file_size <- file.info(output_file)$size
+  if (file_size > 1024 * 1024) {
+    message(paste("File size:", round(file_size / 1024 / 1024, 2), "MB"))
+  } else {
+    message(paste("File size:", round(file_size / 1024, 2), "KB"))
+  }
 })
 
 ################################################################################################
@@ -312,11 +386,13 @@ setMethod("plotTSS",signature(object = "TSSr"), function(object, samples, tssDat
 #' Export TSS tables
 #'
 #' @description Exports TSS tables to text file.
-#' @usage exportTSStable(object, data = "raw", merged = "TRUE")
+#' @usage exportTSStable(object, data = "raw", merged = "TRUE", outputFile = NULL)
 #'
 #' @param object A TSSr object.
 #' @param data Specify which data will be exported: "raw" or "processed". Default is "raw".
 #' @param merged Specify whether to export merged TSS table. Used only if data = "raw".
+#' @param outputFile Custom output file name. If NULL (default), uses automatic naming
+#'        like "ALL.samples.TSS.raw.txt".
 #' @return TSS tables
 #'
 #' @export
@@ -325,25 +401,33 @@ setMethod("plotTSS",signature(object = "TSSr"), function(object, samples, tssDat
 #' data(exampleTSSr)
 #' #exportTSStable(exampleTSSr)
 #' #exportTSStable(exampleTSSr, data="raw")
-setGeneric("exportTSStable",function(object, data = "raw", merged = "TRUE")standardGeneric("exportTSStable"))
+#' #exportTSStable(exampleTSSr, data="raw", outputFile = "my_tss_data.txt")
+setGeneric("exportTSStable",function(object, data = "raw", merged = "TRUE",
+                                      outputFile = NULL)standardGeneric("exportTSStable"))
 #' @rdname exportTSStable
 #' @export
-setMethod("exportTSStable",signature(object = "TSSr"), function(object, data, merged){
+setMethod("exportTSStable",signature(object = "TSSr"), function(object, data, merged, outputFile){
   message("Exporting TSS table...")
+
+  # Determine output filename
+  if (is.null(outputFile)) {
+    outputFile <- paste("ALL.samples.TSS", data, "txt", sep = ".")
+  }
+
   if(data == "raw"){
     if(merged == "TRUE"){
       tss <- object@TSSprocessedMatrix
-      write.table(tss, file = paste("ALL.samples.TSS",data,"txt", sep = "."), sep = "\t", quote = FALSE, row.names = FALSE)
     }else{
       tss <- object@TSSrawMatrix
-      write.table(tss, file = paste("ALL.samples.TSS",data,"txt", sep = "."), sep = "\t", quote = FALSE, row.names = FALSE)
     }
   }else if(data == "processed"){
     tss <- object@TSSprocessedMatrix
-    write.table(tss, file = paste("ALL.samples.TSS",data,"txt", sep = "."), sep = "\t", quote = FALSE, row.names = FALSE)
   }else{
     stop("No data for the given TSS data type!")
   }
+
+  write.table(tss, file = outputFile, sep = "\t", quote = FALSE, row.names = FALSE)
+  message(paste("TSS table exported to:", outputFile))
 })
 
 ################################################################################################

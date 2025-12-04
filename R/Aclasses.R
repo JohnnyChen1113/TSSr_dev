@@ -52,10 +52,10 @@
 #' @import data.table
 #' @import rmarkdown
 #' @import parallel
-#' @importFrom grDevices dev.off pdf rainbow
+#' @importFrom grDevices cairo_pdf dev.off pdf png rainbow tiff
 #' @importFrom graphics hist pairs par plot points strwidth text
 #' @importFrom methods as new
-#' @importFrom stats chisq.test cor p.adjust prcomp qpois
+#' @importFrom stats chisq.test cor ks.test p.adjust prcomp qpois
 #' @importFrom utils installed.packages read.table write.table
 #'
 #' @slot genomeName character.
@@ -80,6 +80,7 @@
 #' @slot DEtables list.
 #' @slot TAGtables list
 #' @slot PromoterShift list.
+#' @slot KSTestResults list.
 #' @docType class
 #' @name TSSr-class
 #' @rdname TSSr-class
@@ -108,6 +109,7 @@ setClass(Class = "TSSr",
                         ,DEtables = "list"
                         ,TAGtables = "list"
                         ,PromoterShift = "list"
+                        ,KSTestResults = "list"
          ),
          prototype(genomeName = character()
                    ,inputFiles = character()
@@ -131,6 +133,7 @@ setClass(Class = "TSSr",
                    ,DEtables = list()
                    ,TAGtables = list()
                    ,PromoterShift = list()
+                   ,KSTestResults = list()
          ),
          validity=function(object){
            supportedTypes <- c("bam", "bamPairedEnd", "bed", "tss", "TSStable", "BigWig")

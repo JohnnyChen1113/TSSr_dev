@@ -372,3 +372,280 @@ readsGR.m <- readsGR[
 
   return(TSS.all.samples)
 }
+
+################################################################################
+#' Process BAM chunk to TSS
+#'
+#' @description Internal function to convert a BAM chunk to TSS data.
+#' Used for chunked reading of large BAM files.
+#'
+#' @param bam BAM data from scanBam
+#' @param Genome BSgenome object
+#' @param sequencingQualityThreshold Quality threshold
+#' @param mappingQualityThreshold Mapping quality threshold
+#' @param softclippingAllowed Whether softclipping is allowed
+#' @param chunksize Chunk size for processing
+#' @return A data.table with TSS positions and tag counts
+#' @keywords internal
+.bam_to_TSS <- function(bam, Genome,
+                        sequencingQualityThreshold,
+                        mappingQualityThreshold,
+                        softclippingAllowed,
+                        chunksize) {
+
+  # Calculate average quality scores in chunks
+  qual <- bam[[1]]$qual
+  start <- 1
+  qa.avg <- vector(mode = "integer")
+
+  repeat {
+    if (start + chunksize <= length(qual)) {
+      end <- start + chunksize
+    } else {
+      end <- length(qual)
+    }
+    qa.avg <- c(qa.avg, as.integer(sapply(as(qual[start:end], "IntegerList"), mean)))
+    if (end == length(qual)) {
+      break
+    } else {
+      start <- end + 1
+    }
+  }
+  qa.avg[is.na(qa.avg)] <- -1
+
+  # Calculate mapped lengths from CIGAR strings
+  cigar <- bam[[1]]$cigar
+  start <- 1
+  mapped.length <- vector(mode = "integer")
+
+  repeat {
+    if (start + chunksize <= length(cigar)) {
+      end <- start + chunksize
+    } else {
+      end <- length(cigar)
+    }
+    if (softclippingAllowed) {
+      mapped.length <- c(mapped.length,
+                         as.integer(sum(as(str_extract_all(bam[[1]]$cigar[start:end], "([0-9]+)"), "IntegerList"))) -
+                           ifelse(is.na(sub("S", "", str_extract(bam[[1]]$cigar[start:end], "[0-9]+S"))),
+                                  0,
+                                  as.integer(sub("S", "", str_extract(bam[[1]]$cigar[start:end], "[0-9]+S")))))
+    } else {
+      mapped.length <- c(mapped.length,
+                         as.integer(sum(as(str_extract_all(bam[[1]]$cigar[start:end], "([0-9]+)"), "IntegerList"))))
+    }
+    if (end == length(cigar)) {
+      break
+    } else {
+      start <- end + 1
+    }
+  }
+
+  # Create GRanges object
+  readsGR <- GRanges(
+    seqnames = as.vector(bam[[1]]$rname),
+    IRanges(start = bam[[1]]$pos, width = mapped.length),
+    strand = bam[[1]]$strand,
+    qual = qa.avg,
+    mapq = bam[[1]]$mapq,
+    seq = bam[[1]]$seq,
+    read.length = width(bam[[1]]$seq),
+    flag = bam[[1]]$flag
+  )
+
+  # Filter by genome
+  readsGR <- readsGR[as.character(readsGR@seqnames) %in% seqnames(Genome)]
+  readsGR <- readsGR[!(end(readsGR) > seqlengths(Genome)[as.character(seqnames(readsGR))])]
+  GenomicRanges::elementMetadata(readsGR)$mapq[is.na(GenomicRanges::elementMetadata(readsGR)$mapq)] <- Inf
+
+  # Filter by quality
+  readsGR.p <- readsGR[(as.character(strand(readsGR)) == "+" &
+                          GenomicRanges::elementMetadata(readsGR)$qual >= sequencingQualityThreshold) &
+                          GenomicRanges::elementMetadata(readsGR)$mapq >= mappingQualityThreshold]
+  readsGR.m <- readsGR[(as.character(strand(readsGR)) == "-" &
+                          GenomicRanges::elementMetadata(readsGR)$qual >= sequencingQualityThreshold) &
+                          GenomicRanges::elementMetadata(readsGR)$mapq >= mappingQualityThreshold]
+
+  if (softclippingAllowed) {
+    TSS.p <- data.table(chr = as.character(seqnames(readsGR.p)),
+                        pos = start(readsGR.p),
+                        strand = "+",
+                        stringsAsFactors = FALSE)
+    TSS.m <- data.table(chr = as.character(seqnames(readsGR.m)),
+                        pos = end(readsGR.m),
+                        strand = "-",
+                        stringsAsFactors = FALSE)
+    TSS <- rbind(TSS.p, TSS.m)
+    TSS <- TSS[, c("chr", "pos", "strand")]
+    TSS$tag_count <- 1
+    setDT(TSS)
+    TSS <- TSS[, .(tag_count = as.integer(sum(tag_count))), by = list(chr, pos, strand)]
+  } else {
+    # Remove G mismatch
+    TSS <- .removeNewG(readsGR.p, readsGR.m, Genome)
+  }
+
+  return(TSS)
+}
+
+################################################################################
+#' Auto-detect optimal readsPerPiece based on available memory
+#'
+#' @description Detects available system memory and calculates an optimal
+#' chunk size for reading BAM files.
+#'
+#' @return Numeric value for readsPerPiece parameter
+#' @keywords internal
+.get_readsPerPiece <- function() {
+
+  sysInfo <- Sys.info()
+
+  if (!is.null(sysInfo)) {
+    OS <- sysInfo['sysname']
+  } else {
+    OS <- "Unknown"
+  }
+
+  available_memory_gb <- NULL
+
+  # Windows
+  if (OS == "Windows") {
+    tryCatch({
+      cmd <- "wmic OS get FreePhysicalMemory /Value"
+      output <- system2("cmd", args = c("/c", cmd), stdout = TRUE)
+      available_memory <- as.numeric(gsub("\\D", "", output))
+      available_memory <- na.omit(available_memory)
+      available_memory_gb <- available_memory[1] / (1024^2)
+      message(available_memory_gb, " GB of memory available on your Windows machine")
+    }, error = function(e) {
+      message("Could not detect memory on Windows, using default value")
+      available_memory_gb <<- 4
+    })
+  }
+
+  # Linux/Mac
+  if (OS != "Windows") {
+    tryCatch({
+      cmd <- "free -b | grep 'Mem:' | awk '{print $7}'"
+      available_memory <- as.numeric(system2("bash", args = c("-c", cmd), stdout = TRUE))
+      available_memory <- na.omit(available_memory)
+      available_memory_gb <- available_memory[1] / (1024^3)
+      message(round(available_memory_gb, 2), " GB of memory available on your machine")
+    }, error = function(e) {
+      message("Could not detect memory, using default value")
+      available_memory_gb <<- 4
+    })
+  }
+
+  if (is.null(available_memory_gb) || is.na(available_memory_gb)) {
+    available_memory_gb <- 4
+  }
+
+  # Calculate readsPerPiece: roughly 0.3GB per 1M reads
+  readsPerPieceLocal <- as.integer(available_memory_gb * 0.8 / 0.3 * 1000000)
+  readsPerPieceLocal <- max(readsPerPieceLocal, 1000000)  # Minimum 1M reads
+
+  message("readsPerPiece set to: ", format(readsPerPieceLocal, big.mark = ",", scientific = FALSE))
+
+  return(readsPerPieceLocal)
+}
+
+################################################################################
+#' Get TSS from BAM files with chunked reading support
+#'
+#' @description Modified version of .getTSS_from_bam that supports chunked
+#' reading for large BAM files to reduce memory usage.
+#'
+#' @param bam.files Vector of BAM file paths
+#' @param Genome BSgenome object
+#' @param sampleLabels Sample labels
+#' @param inputFilesType Input file type
+#' @param sequencingQualityThreshold Quality threshold
+#' @param mappingQualityThreshold Mapping quality threshold
+#' @param softclippingAllowed Whether softclipping is allowed
+#' @param readsPerPiece Number of reads to process at a time
+#' @return A data.table with TSS data for all samples
+#' @keywords internal
+.getTSS_from_bam_chunked <- function(bam.files, Genome, sampleLabels, inputFilesType,
+                                      sequencingQualityThreshold,
+                                      mappingQualityThreshold,
+                                      softclippingAllowed,
+                                      readsPerPiece) {
+  ##define variable as a NULL value
+  chr = pos = tag_count = strand = NULL
+
+  what <- c("rname", "strand", "pos", "seq", "qual", "mapq", "flag", "cigar")
+  param <- ScanBamParam(what = what,
+                        flag = scanBamFlag(isUnmappedQuery = FALSE,
+                                           isNotPassingQualityControls = FALSE),
+                        mapqFilter = mappingQualityThreshold)
+  if (inputFilesType == "bamPairedEnd") {
+    Rsamtools::bamFlag(param) <- scanBamFlag(isUnmappedQuery = FALSE,
+                                              isProperPair = TRUE,
+                                              isFirstMateRead = TRUE)
+  }
+
+  chunksize <- 1e6
+  first <- TRUE
+
+  for (i in seq_len(length(bam.files))) {
+    message("\nReading in file: ", bam.files[i], "...")
+
+    bamFile <- BamFile(bam.files[i])
+    yieldSize(bamFile) <- readsPerPiece
+
+    records <- countBam(bamFile)
+    n_chunks <- as.integer(records$records / readsPerPiece) + 1
+    message("\t-> Processing in ", n_chunks, " chunk(s)...")
+
+    open(bamFile)
+    TSS <- NULL
+
+    for (j in seq_len(n_chunks)) {
+      bami <- scanBam(bamFile, param = param)
+
+      # Skip if no reads
+      if (length(bami[[1]]$pos) == 0) next
+
+      tssi <- .bam_to_TSS(bami, Genome,
+                          sequencingQualityThreshold,
+                          mappingQualityThreshold,
+                          softclippingAllowed,
+                          chunksize)
+
+      if (is.null(TSS)) {
+        TSS <- tssi
+      } else {
+        TSS <- rbind(TSS, tssi)
+      }
+    }
+
+    close(bamFile)
+
+    if (is.null(TSS) || nrow(TSS) == 0) {
+      warning("No TSS data obtained from file: ", bam.files[i])
+      next
+    }
+
+    # Aggregate tag counts
+    TSS <- TSS[, .(V1 = as.integer(sum(tag_count))), by = list(chr, pos, strand)]
+    setnames(TSS, c("chr", "pos", "strand", sampleLabels[i]))
+    setkey(TSS, chr, pos, strand)
+
+    if (first == TRUE) {
+      TSS.all.samples <- TSS
+    } else {
+      TSS.all.samples <- merge(TSS.all.samples, TSS, all = TRUE)
+    }
+    first <- FALSE
+    gc()
+  }
+
+  # Replace NA with 0 only in sample columns (not in chr, pos, strand!)
+  sample_cols <- names(TSS.all.samples)[4:ncol(TSS.all.samples)]
+  for (col in sample_cols) {
+    set(TSS.all.samples, which(is.na(TSS.all.samples[[col]])), col, 0L)
+  }
+
+  return(TSS.all.samples)
+}
